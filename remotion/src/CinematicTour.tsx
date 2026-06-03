@@ -4,37 +4,33 @@
  * The top-level Remotion composition for the property walkthrough.
  *
  * Architecture:
- *   ┌─ AbsoluteFill ──────────────────────────────────────────────────────┐
- *   │  ┌─ ThreeCanvas (single persistent WebGL context) ────────────────┐ │
- *   │  │  Suspense                                                       │ │
- *   │  │   └─ DepthParallaxScene                                         │ │
- *   │  │       • Dual-layer mesh (foreground + background)               │ │
- *   │  │       • VirtualCamera drives camera per-frame                   │ │
- *   │  │       • Supports WALK_FORWARD sway, PUSH_IN dolly, ORBIT, etc.  │ │
- *   │  │       • Momentum preserved: shot N start == shot N-1 end        │ │
- *   │  └─────────────────────────────────────────────────────────────────┘ │
- *   │  ┌─ Series (overlay layer — no 3D context) ───────────────────────┐  │
- *   │  │  Series.Sequence × N shots                                      │  │
- *   │  │   └─ ShotNode → TransitionOverlay (FADE / CROSS_DISSOLVE)      │  │
- *   │  └─────────────────────────────────────────────────────────────────┘  │
- *   │  ┌─ Branding Overlay ─────────────────────────────────────────────┐  │
- *   │  │  Logo (CORNER or LOWER_THIRD)                                   │  │
- *   │  └─────────────────────────────────────────────────────────────────┘  │
- *   └────────────────────────────────────────────────────────────────────────┘
+ *   ┌─ AbsoluteFill ─────────────────────────────────────────────────────────┐
+ *   │  ┌─ CinematicScene (CSS transforms — frame-accurate) ────────────────┐ │
+ *   │  │  • scale(z_base/camera_z) — forward/backward dolly                │ │
+ *   │  │  • translate(x%, y%) — lateral pan toward next room               │ │
+ *   │  │  • Optional BG layer at reduced rate for depth parallax            │ │
+ *   │  │  • VirtualCamera math runs inside CinematicScene via interpolate   │ │
+ *   │  └──────────────────────────────────────────────────────────────────── ┘ │
+ *   │  ┌─ Series (overlay layer) ────────────────────────────────────────────┐ │
+ *   │  │  Series.Sequence × N shots                                          │ │
+ *   │  │   └─ ShotNode → TransitionOverlay (FADE / CROSS_DISSOLVE / etc.)   │ │
+ *   │  └──────────────────────────────────────────────────────────────────── ┘ │
+ *   │  ┌─ Branding Overlay ──────────────────────────────────────────────────┐ │
+ *   │  │  Logo (CORNER or LOWER_THIRD)                                       │ │
+ *   │  └──────────────────────────────────────────────────────────────────── ┘ │
+ *   └────────────────────────────────────────────────────────────────────────── ┘
  *
- * KEY FIX: DepthParallaxScene is NOT remounted between shots.
- *   Previously: `key={active.shotIndex}` caused full WebGL context destruction
- *   and camera teleportation on every cut.
- *   Now: the scene persists for the full video; the camera state streams
- *   continuously from VirtualCamera based on the active shot's parameters.
+ * WHY CSS NOT WebGL:
+ *   Remotion renders each frame independently. WebGL useFrame() is NOT called
+ *   at the right time for each frame during export, causing wrong camera positions.
+ *   CSS interpolate() is synchronous and frame-accurate.
  */
 
 import React, { useMemo, Suspense } from 'react';
 import { AbsoluteFill, Series, useCurrentFrame, useVideoConfig } from 'remotion';
-import { ThreeCanvas } from '@remotion/three';
 import type { RemotionInputProps, ShotNodeConfig } from './Root';
 import { ShotNode } from './components/ShotNode';
-import { DepthParallaxScene } from './components/DepthParallaxScene';
+import { CinematicScene } from './components/CinematicScene';
 
 const FPS = 30;
 
@@ -78,46 +74,28 @@ export const CinematicTour: React.FC<RemotionInputProps> = (props) => {
 
     const active = useMemo(() => getActiveShot(frame, timeline), [frame, timeline]);
 
-    // Camera distance: at this Z with 75° FOV the image plane exactly fills the comp.
-    const cameraZ = (height / 2) / Math.tan((75 / 2) * Math.PI / 180);
-
     return (
         <AbsoluteFill style={{ backgroundColor: branding.primary_color_hex }}>
 
             {/*
-              * Single persistent ThreeCanvas — survives across all shots.
-              * The DepthParallaxScene inside does NOT use a `key` prop, so the
-              * WebGL context (and camera state) are never destroyed mid-video.
+              * CinematicScene — pure CSS transforms, frame-accurate.
+              * No WebGL, no useFrame race conditions.
+              * The image is rendered at 150% size; scale + translate drive the motion.
               */}
-            <ThreeCanvas
+            <CinematicScene
+                imageUrl={active.shot.image_url}
+                depthUrl={active.shot.depth_map_url}
+                durationInFrames={active.durationInFrames}
+                relativeFrame={active.relativeFrame}
+                motionType={active.shot.motion_type}
+                motionStrength={active.shot.motion_strength}
+                motionCurve={active.shot.motion_curve}
+                depthParallaxStrength={active.shot.depth_parallax_strength}
+                cameraStart={active.shot.camera_start_target}
+                cameraEnd={active.shot.camera_end_target}
                 width={width}
                 height={height}
-                linear
-                camera={{ fov: 75, position: [0, 0, cameraZ], near: 0.1, far: 12000.0 }}
-            >
-                <Suspense fallback={null}>
-                    {/*
-                      * NO key={active.shotIndex} here — this is the critical fix.
-                      * The scene streams new props each frame via relativeFrame /
-                      * motionType changes; the WebGL context persists throughout.
-                      */}
-                    <DepthParallaxScene
-                        imageUrl={active.shot.image_url}
-                        depthUrl={active.shot.depth_map_url}
-                        proceduralTargets={active.shot.procedural_motion_targets}
-                        durationInFrames={active.durationInFrames}
-                        relativeFrame={active.relativeFrame}
-                        motionType={active.shot.motion_type}
-                        motionStrength={active.shot.motion_strength}
-                        motionCurve={active.shot.motion_curve}
-                        depthParallaxStrength={active.shot.depth_parallax_strength}
-                        cameraStart={active.shot.camera_start_target}
-                        cameraEnd={active.shot.camera_end_target}
-                        width={width}
-                        height={height}
-                    />
-                </Suspense>
-            </ThreeCanvas>
+            />
 
             {/* Overlay layer: transition effects + per-shot decorators */}
             <Series>
@@ -146,6 +124,7 @@ export const CinematicTour: React.FC<RemotionInputProps> = (props) => {
                             width:  branding.logo_mapping === 'LOWER_THIRD' ? '100%' : '300px',
                             objectFit: 'contain',
                         }}
+                        alt=""
                     />
                 </AbsoluteFill>
             )}

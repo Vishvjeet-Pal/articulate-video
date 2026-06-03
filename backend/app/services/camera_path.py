@@ -1,21 +1,32 @@
 """
 CameraPathPlanner
 =================
-Generates a continuous, momentum-preserving global camera trajectory for the
-entire property tour sequence.  Instead of calculating per-shot start/end
-positions independently, this planner:
+Generates camera start/end positions for every shot in the property tour.
 
-  1. Builds a room adjacency graph (RoomNode / RoomEdge).
-  2. Assigns a cinematic motion type to each shot based on room context.
-  3. Computes a global trajectory where Shot N+1 starts exactly where Shot N ended.
-  4. Applies depth-aware Z-axis dolly movement so the camera moves THROUGH
-     depth space rather than only across a flat plane.
-  5. Adds subtle sinusoidal walking sway to WALK_FORWARD shots.
+Motion model:
+  The camera simulates a person walking through the house holding a stabilized
+  camera.  The CSS renderer (CinematicScene.tsx) converts camera [x, y, z] into
+  CSS scale + translate, where:
+
+    scale = camera_z_base / camera_z
+    translate = -camera_x / (comp_width * OVERSCALE) * 100%
+
+  Key behaviours:
+    1. WALK_FORWARD toward next room: camera pans in the world-space direction of
+       the next room (e.g. Kitchen is to the right → camera pans right) AND zooms
+       in (Z decreases) simulating walking forward.
+    2. DOLLY_FORWARD entering a room: strong Z zoom-in sweep as camera "enters"
+       the new space and settles toward the center.
+    3. Z RESET at room transitions: the black-dip transition (CROSS_DISSOLVE/FADE)
+       covers any Z discontinuity, so each room can start fresh from a natural
+       position.  XY partially carries over to maintain directional feel.
+    4. Strong Z travel per shot: 20-30% per shot → 28-43% apparent zoom = clearly
+       visible forward motion.
 """
 
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import (
@@ -25,7 +36,6 @@ from app.core.config import (
     MOTION_STRENGTH_DEFAULTS,
     PLANE_OVERSCALE_FACTOR,
     ROOM_ADJACENCY_GRAPH,
-    WALK_SWAY_AMPLITUDE,
 )
 
 
@@ -35,28 +45,20 @@ from app.core.config import (
 
 @dataclass
 class RoomNode:
-    """A node in the spatial scene graph representing one room."""
     room_type: str
-    # World-space position (metres, approximate).  Used to derive camera path
-    # vectors between rooms.
     position: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclass
 class RoomEdge:
-    """A directed edge between two adjacent rooms."""
     from_room: str
     to_room: str
-    # Semantic hint used to choose the transition type.
-    transition_hint: str = "doorway"  # "doorway" | "hallway" | "open_plan"
+    transition_hint: str = "doorway"
 
 
 @dataclass
 class ShotCameraParams:
-    """
-    Fully-resolved camera parameters for a single shot.
-    All positions are in Three.js world-space units.
-    """
+    """Camera parameters for a single shot. Positions in world-space units."""
     start: Tuple[float, float, float]
     end: Tuple[float, float, float]
     motion_type: str
@@ -67,110 +69,101 @@ class ShotCameraParams:
 
 
 # ---------------------------------------------------------------------------
-# Canonical room world-space positions
-# Used to derive travel vectors when real camera poses are unavailable.
+# Room world-space positions (X = left-/right+, Y = down-/up+, Z = near/far)
+# These define the spatial layout for the directional walk logic.
+# Kitchen to the right of Living Room → WALK_FORWARD pans +X toward Kitchen.
 # ---------------------------------------------------------------------------
 _ROOM_WORLD_POSITIONS: Dict[str, Tuple[float, float, float]] = {
-    "Exterior":         (0.0,    0.0,  0.0),
-    "Living Room":      (0.0,    0.0,  10.0),
-    "Kitchen":          (5.0,    0.0,  10.0),
-    "Dining Room":      (5.0,    0.0,  5.0),
-    "Primary Bedroom":  (-5.0,   5.0,  15.0),
-    "Other Bedrooms":   (5.0,    5.0,  15.0),
-    "Primary Bathroom": (-5.0,   5.0,  20.0),
-    "Other Bathrooms":  (5.0,    5.0,  20.0),
-    "Other":            (0.0,    0.0,  15.0),
+    "Exterior":         (0.0,   0.0,   0.0),
+    "Living Room":      (0.0,   0.0,   5.0),
+    "Kitchen":          (8.0,   0.0,   5.0),   # right of Living Room
+    "Dining Room":      (4.0,   0.0,   3.0),
+    "Primary Bedroom":  (-5.0,  0.0,  12.0),   # up the hallway, left
+    "Other Bedrooms":   (5.0,   0.0,  12.0),
+    "Primary Bathroom": (-5.0, -1.0,  15.0),
+    "Other Bathrooms":  (5.0,  -1.0,  15.0),
+    "Other":            (0.0,   0.0,   8.0),
 }
 
 
 class CameraPathPlanner:
-    """
-    Plans a smooth, continuous camera path across the entire property tour.
-    """
 
     def __init__(self, comp_width: float = 3840.0, comp_height: float = 2160.0,
                  camera_fov: float = 75.0, rng_seed: int = 42):
-        self.comp_width = comp_width
+        self.comp_width  = comp_width
         self.comp_height = comp_height
-        self.camera_fov = camera_fov
+        self.camera_fov  = camera_fov
         self.rng = random.Random(rng_seed)
 
-        # Neutral camera distance so the image fills exactly the composition.
+        # camera_z_base: distance at which image exactly fills the frame
         self.camera_z_base: float = (comp_height / 2.0) / math.tan(
             math.radians(camera_fov / 2.0)
         )
 
-        # Safe XY pan budget.
-        # IMPORTANT: Use only 40% of the available margin — Collov-style motion is
-        # very restrained.  Using the full margin (480px at 4K) makes the camera
-        # feel like it's sliding across the image, not walking through a room.
+        # XY pan budget: fraction of the overscale margin
         plane_w = comp_width  * PLANE_OVERSCALE_FACTOR
         plane_h = comp_height * PLANE_OVERSCALE_FACTOR
         full_x_max = max(0.0, (plane_w - comp_width)  / 2.0)
         full_y_max = max(0.0, (plane_h - comp_height) / 2.0)
-        self.x_max = full_x_max * 0.40   # ~192px of lateral travel at 4K
-        self.y_max = full_y_max * 0.40   # ~108px of vertical travel at 4K
+        self.x_max = full_x_max * 0.80   # 80% of margin = strong visible pan
+        self.y_max = full_y_max * 0.60
 
-        # Z travel limits — tight range so dolly is felt but not disorienting.
-        # 5% closer/farther than neutral is very cinematic; 18% was too aggressive.
-        self.z_near = self.camera_z_base * DOLLY_Z_MIN_MULT  # closest (push-in end)
-        self.z_far  = self.camera_z_base * DOLLY_Z_MAX_MULT  # farthest (pull-out end)
+        # Z bounds
+        self.z_near = self.camera_z_base * DOLLY_Z_MIN_MULT  # closest (max zoom-in)
+        self.z_far  = self.camera_z_base * DOLLY_Z_MAX_MULT  # farthest (max zoom-out)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def build_room_graph(self, shots: List[Dict[str, Any]]) -> Dict[str, RoomNode]:
-        """
-        Creates RoomNode entries for every unique room type in the shot list.
-        Populates canonical world positions from the predefined map, falling
-        back to camera_pose data when available.
-        """
         nodes: Dict[str, RoomNode] = {}
         for shot in shots:
             room = shot.get("room_type", "Other")
             if room not in nodes:
-                pos = _ROOM_WORLD_POSITIONS.get(room, (0.0, 0.0, 15.0))
-                # Override with real pose data if present
-                pose = shot.get("camera_pose")
-                if pose and isinstance(pose, list) and len(pose) == 4:
-                    try:
-                        pos = (float(pose[0][3]), float(pose[1][3]), float(pose[2][3]))
-                    except (ValueError, TypeError, IndexError):
-                        pass
+                pos = _ROOM_WORLD_POSITIONS.get(room, (0.0, 0.0, 8.0))
                 nodes[room] = RoomNode(room_type=room, position=pos)
         return nodes
 
     def assign_motion_types(self, shots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Assigns a motion_type, motion_strength, and motion_curve to each shot
-        based on room type using weighted random selection.
-        The first shot always gets REVEAL, the last always gets SLOW_DRIFT.
+        Assigns motion_type to each shot based on narrative position.
+
+          Shot 0        → REVEAL
+          Last shot     → SLOW_DRIFT
+          Just entered new room  → DOLLY_FORWARD (camera sweeps in)
+          About to leave room    → WALK_FORWARD  (camera pans toward next room + zooms)
+          Mid-room               → per-room weighted preset
         """
         enriched = []
         for idx, shot in enumerate(shots):
-            room = shot.get("room_type", "Other")
-            presets = CAMERA_MOTION_PRESETS.get(room, CAMERA_MOTION_PRESETS["Other"])
+            room      = shot.get("room_type", "Other")
+            prev_room = shots[idx - 1].get("room_type", "Other") if idx > 0 else None
+            next_room = shots[idx + 1].get("room_type", "Other") if idx < len(shots) - 1 else None
 
-            # Force narrative bookmarks
             if idx == 0:
                 motion_type = "REVEAL"
             elif idx == len(shots) - 1:
                 motion_type = "SLOW_DRIFT"
+            elif room != prev_room:
+                # Just arrived in a new room — sweep inward
+                motion_type = "DOLLY_FORWARD"
+            elif next_room is not None and next_room != room:
+                # About to leave — walk toward next room
+                motion_type = "WALK_FORWARD"
             else:
+                presets = CAMERA_MOTION_PRESETS.get(room, CAMERA_MOTION_PRESETS["Other"])
                 motion_type = self._weighted_choice(presets)
 
-            motion_strength = MOTION_STRENGTH_DEFAULTS.get(motion_type, 0.5)
-            # Slight random variance (±15%) keeps adjacent shots of the same type distinct
-            motion_strength = max(0.2, min(1.0,
-                motion_strength + self.rng.uniform(-0.15, 0.15)
-            ))
+            strength = MOTION_STRENGTH_DEFAULTS.get(motion_type, 0.6)
+            strength = max(0.4, min(1.0, strength + self.rng.uniform(-0.10, 0.10)))
 
-            enriched_shot = dict(shot)
-            enriched_shot["motion_type"]    = motion_type
-            enriched_shot["motion_strength"] = round(motion_strength, 3)
-            enriched_shot["motion_curve"]   = "easeInOutCubic"
-            enriched.append(enriched_shot)
+            s = dict(shot)
+            s["motion_type"]    = motion_type
+            s["motion_strength"] = round(strength, 3)
+            s["motion_curve"]   = "easeInOutCubic"
+            s["next_room"]      = next_room
+            enriched.append(s)
         return enriched
 
     def plan_global_trajectory(
@@ -178,38 +171,52 @@ class CameraPathPlanner:
         shots: List[Dict[str, Any]],
         room_graph: Dict[str, RoomNode],
     ) -> List[ShotCameraParams]:
-        """
-        Core planner.  Returns one ShotCameraParams per shot.
-
-        Key properties:
-          - Shot N+1 start == Shot N end  (no teleportation)
-          - Z axis moves to simulate depth approach / withdrawal
-          - Walking sway added for WALK_FORWARD shots
-          - Transition types derived from room adjacency
-        """
         params: List[ShotCameraParams] = []
-        prev_end: Tuple[float, float, float] = (0.0, 0.0, self.camera_z_base)
+
+        # First shot starts slightly off-axis (REVEAL sweeps to centre)
+        prev_end: Tuple[float, float, float] = (
+            self.x_max * 0.45,
+            self.y_max * 0.15,
+            self.camera_z_base * 1.20,   # start from wide/far for REVEAL
+        )
 
         for idx, shot in enumerate(shots):
-            room       = shot.get("room_type", "Other")
-            motion     = shot.get("motion_type", "WALK_FORWARD")
-            strength   = shot.get("motion_strength", 0.5)
-            curve      = shot.get("motion_curve", "easeInOutCubic")
-            has_depth  = bool(shot.get("depth_map_url"))
+            room      = shot.get("room_type", "Other")
+            motion    = shot.get("motion_type", "WALK_FORWARD")
+            strength  = shot.get("motion_strength", 0.6)
+            curve     = shot.get("motion_curve", "easeInOutCubic")
+            has_depth = bool(shot.get("depth_map_url"))
+            next_room = shot.get("next_room")
 
-            depth_strength = 0.6 if has_depth else 0.3
+            depth_strength = 0.7 if has_depth else 0.4
+
+            # -----------------------------------------------------------------
+            # Z RESET at room transitions (CROSS_DISSOLVE / FADE).
+            # The black-dip overlay covers the Z discontinuity so the viewer
+            # never sees the jump.  This lets each room start from a natural
+            # Z position rather than wherever the last room left off.
+            # XY is partially carried over to maintain directional momentum.
+            # -----------------------------------------------------------------
+            if idx > 0:
+                prev_room = shots[idx - 1].get("room_type", "Other")
+                transition_hint = self._compute_transition(prev_room, room)
+
+                if transition_hint in ("FADE", "CROSS_DISSOLVE"):
+                    px, py, _ = prev_end
+                    # Carry 40% of XY (direction carry-over), reset Z to entry position
+                    entry_z = self.camera_z_base * 1.12   # slightly far = "just stepped in"
+                    prev_end = (px * 0.40, py * 0.25, entry_z)
 
             start, end = self._compute_shot_camera(
                 prev_end=prev_end,
                 motion_type=motion,
                 motion_strength=strength,
                 room=room,
+                next_room=next_room,
                 room_graph=room_graph,
-                is_first=(idx == 0),
-                is_last=(idx == len(shots) - 1),
             )
 
-            # Transition to the next shot
+            # Transition type
             if idx == 0:
                 transition = "FADE"
             else:
@@ -226,24 +233,7 @@ class CameraPathPlanner:
                 transition_type=transition,
             ))
 
-            # ---------------------------------------------------------------
-            # Mean-reversion: prevent cumulative Z/XY drift from pinning the
-            # camera at z_near or an extreme pan position.
-            #
-            # After each shot, pull the carry-over position 30% back toward
-            # neutral (z_base for Z, 0 for XY).  This keeps the motion feeling
-            # continuous — the next shot still starts where this one ended —
-            # but oscillates around neutral rather than drifting monotonically
-            # to one extreme.  The viewer sees smooth motion in both directions.
-            # ---------------------------------------------------------------
-            REVERT_Z_FACTOR  = 0.30   # 30% pull back toward z_base
-            REVERT_XY_FACTOR = 0.20   # 20% pull back toward centre
-
-            ex, ey, ez = end
-            reverted_z = ez + (self.camera_z_base - ez) * REVERT_Z_FACTOR
-            reverted_x = ex + (0.0 - ex) * REVERT_XY_FACTOR
-            reverted_y = ey + (0.0 - ey) * REVERT_XY_FACTOR
-            prev_end = (reverted_x, reverted_y, reverted_z)
+            prev_end = end
 
         return params
 
@@ -251,20 +241,38 @@ class CameraPathPlanner:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _clamp(self, value: float, lower: float, upper: float) -> float:
-        return max(lower, min(value, upper))
+    def _clamp(self, v: float, lo: float, hi: float) -> float:
+        return max(lo, min(v, hi))
 
     def _weighted_choice(self, presets: List[Tuple[str, float]]) -> str:
-        """Select a motion type using normalised weights."""
         types, weights = zip(*presets)
         total = sum(weights)
         r = self.rng.uniform(0, total)
-        cumulative = 0.0
+        acc = 0.0
         for t, w in zip(types, weights):
-            cumulative += w
-            if r <= cumulative:
+            acc += w
+            if r <= acc:
                 return t
         return types[-1]
+
+    def _direction_to_next_room(
+        self,
+        current_room: str,
+        next_room: Optional[str],
+    ) -> Tuple[float, float]:
+        """
+        Returns a normalised (dx, dy) direction vector from current_room → next_room.
+        Used by WALK_FORWARD to pan the camera toward the next room.
+        """
+        if next_room is None:
+            return (0.0, 0.0)
+        cur  = _ROOM_WORLD_POSITIONS.get(current_room, (0.0, 0.0, 0.0))
+        nxt  = _ROOM_WORLD_POSITIONS.get(next_room,    (0.0, 0.0, 0.0))
+        dx, dy = nxt[0] - cur[0], nxt[1] - cur[1]
+        mag = math.sqrt(dx * dx + dy * dy)
+        if mag < 0.001:
+            return (0.0, 0.0)
+        return (dx / mag, dy / mag)
 
     def _compute_shot_camera(
         self,
@@ -272,134 +280,133 @@ class CameraPathPlanner:
         motion_type: str,
         motion_strength: float,
         room: str,
+        next_room: Optional[str],
         room_graph: Dict[str, RoomNode],
-        is_first: bool,
-        is_last: bool,
     ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
         """
-        Computes (start, end) camera positions for a single shot.
+        Computes (start, end) camera [x, y, z] for one shot.
 
-        All positions are (x, y, z) in Three.js world units:
-          x = horizontal pan (right = positive)
-          y = vertical pan (up = positive)
-          z = depth (closer = smaller z, farther = larger z)
+        CRITICAL: start is ALWAYS exactly prev_end — never clamped.
+        Only end is bounded.  This guarantees shot[N].start == shot[N-1].end
+        (within the same room sequence / after the Z reset above).
 
-        The start position is always anchored to prev_end so there
-        is no camera jump between shots.
+        Z dolly magnitudes:
+          REVEAL       : z_far → z_base           (wide to neutral, 35% scale change)
+          WALK_FORWARD : sz → sz - 25% * z_base   (~35% apparent zoom in)
+          DOLLY_FORWARD: sz → sz - 28% * z_base   (entering room sweep, ~40% zoom)
+          PUSH_IN      : sz → sz - 30% * z_base   (feature zoom)
+          PULL_OUT     : sz → sz + 22% * z_base   (context reveal)
+          ORBIT        : ±4% gentle breathe
+          TRACK_*/SLOW : ±3% barely perceptible
         """
         sx, sy, sz = prev_end
         xm = self.x_max * motion_strength
         ym = self.y_max * motion_strength
+        zb = self.camera_z_base
 
-        # ---- Z axis behaviour per motion type ----
-        z_base = self.camera_z_base
-        z_near = self.z_near
-        z_far  = self.z_far
-
-        # CRITICAL: start is ALWAYS (sx, sy, sz) — never clamped.
-        # Clamping start would break momentum continuity (Shot N-1 end != Shot N start).
-        # Only the END position is bounded.
-
-        if motion_type == "PUSH_IN":
-            # Collov-style push: gentle forward dolly, no dramatic lunge
-            end_z = self._clamp(sz - (z_base * 0.06) * motion_strength, z_near, z_far)
-            ex = self._clamp(sx + self.rng.uniform(-xm * 0.2, xm * 0.2), -self.x_max, self.x_max)
-            ey = self._clamp(sy + self.rng.uniform(-ym * 0.2, ym * 0.2), -self.y_max, self.y_max)
+        if motion_type == "REVEAL":
+            # First shot: sweep from off-axis/wide to centred/normal
+            # sz is already at z_far (1.20*z_base) from the initial prev_end
+            end_z = self._clamp(sz - zb * 0.25 * motion_strength, self.z_near, self.z_far)
+            end_x = self._clamp(sx * 0.05, -self.x_max, self.x_max)   # settle to center
+            end_y = 0.0
             start = (sx, sy, sz)
-            end   = (ex, ey, end_z)
-
-        elif motion_type == "PULL_OUT":
-            # Camera gently withdraws — reveals context around the subject
-            end_z = self._clamp(sz + (z_base * 0.06) * motion_strength, z_near, z_far)
-            ex = self._clamp(sx + self.rng.uniform(-xm * 0.2, xm * 0.2), -self.x_max, self.x_max)
-            ey = self._clamp(sy + self.rng.uniform(-ym * 0.2, ym * 0.2), -self.y_max, self.y_max)
-            start = (sx, sy, sz)
-            end   = (ex, ey, end_z)
-
-        elif motion_type == "DOLLY_FORWARD":
-            # Lateral sweep toward subject + gentle Z close
-            end_z = self._clamp(sz - (z_base * 0.05) * motion_strength, z_near, z_far)
-            ex = self._clamp(sx * 0.3, -xm, xm)
-            ey = self._clamp(sy * 0.3, -ym, ym)
-            start = (sx, sy, sz)
-            end   = (ex, ey, end_z)
-
-        elif motion_type == "DOLLY_BACK":
-            end_z = self._clamp(sz + (z_base * 0.05) * motion_strength, z_near, z_far)
-            ex = self._clamp(sx * 0.3, -xm, xm)
-            ey = self._clamp(sy * 0.3, -ym, ym)
-            start = (sx, sy, sz)
-            end   = (ex, ey, end_z)
-
-        elif motion_type == "ORBIT":
-            # Parametric arc — VirtualCamera computes the curved path per frame.
-            # Here we just set start/end waypoints.
-            orbit_x = xm * 0.7
-            end_x = self._clamp(sx - orbit_x, -self.x_max, self.x_max)
-            end_z = self._clamp(sz - (z_base * 0.03) * motion_strength, z_near, z_far)
-            start = (sx, sy, sz)
-            end   = (end_x, self._clamp(sy * 0.4, -self.y_max, self.y_max), end_z)
-
-        elif motion_type == "REVEAL":
-            # Sweep from off-axis to centred — used for first shot entrance
-            end_x = self._clamp(sx * 0.08, -self.x_max, self.x_max)
-            end_z = self._clamp(sz - (z_base * 0.05) * motion_strength, z_near, z_far)
-            start = (sx, sy, sz)
-            end   = (end_x, 0.0, end_z)
-
-        elif motion_type == "TRACK_LEFT":
-            end_x = self._clamp(sx - xm, -self.x_max, self.x_max)
-            end_z = self._clamp(sz - (z_base * 0.02) * motion_strength, z_near, z_far)
-            start = (sx, sy, sz)
-            end   = (end_x, sy, end_z)
-
-        elif motion_type == "TRACK_RIGHT":
-            end_x = self._clamp(sx + xm, -self.x_max, self.x_max)
-            end_z = self._clamp(sz - (z_base * 0.02) * motion_strength, z_near, z_far)
-            start = (sx, sy, sz)
-            end   = (end_x, sy, end_z)
+            end   = (end_x, end_y, end_z)
 
         elif motion_type == "WALK_FORWARD":
-            # Collov hero motion: slow, smooth forward drift toward subject.
-            # Very slight X drift gives a natural walking-into-the-room feel.
-            # NO sway — the VirtualCamera adds ultra-subtle breathing on Y instead.
-            end_z = self._clamp(sz - (z_base * 0.04) * motion_strength, z_near, z_far)
-            end_x = self._clamp(sx + self.rng.uniform(-xm * 0.1, xm * 0.1), -self.x_max, self.x_max)
+            # THE MAIN WALKING MOTION.
+            # Camera pans toward the next room AND zooms forward.
+            # Combined effect: viewer feels they're physically walking toward the next space.
+            dir_x, dir_y = self._direction_to_next_room(room, next_room)
+            if abs(dir_x) > 0.05 or abs(dir_y) > 0.05:
+                # Strong directional pan (85% of x_max in the room direction)
+                end_x = self._clamp(sx + dir_x * xm * 0.85, -self.x_max, self.x_max)
+                end_y = self._clamp(sy + dir_y * ym * 0.85, -self.y_max, self.y_max)
+            else:
+                # No clear direction — gentle drift
+                end_x = self._clamp(sx + self.rng.uniform(-xm * 0.15, xm * 0.15), -self.x_max, self.x_max)
+                end_y = self._clamp(sy + self.rng.uniform(-ym * 0.08, ym * 0.08), -self.y_max, self.y_max)
+            # Strong Z forward (25% of z_base → ~33% apparent scale increase)
+            end_z = self._clamp(sz - zb * 0.25 * motion_strength, self.z_near, self.z_far)
+            start = (sx, sy, sz)
+            end   = (end_x, end_y, end_z)
+
+        elif motion_type == "DOLLY_FORWARD":
+            # Entering a new room: camera rushes forward + sweeps to center.
+            # After Z reset, sz ≈ z_base * 1.12. This produces:
+            #   scale_start = 1/1.12 = 0.89 (slightly wide)
+            #   scale_end   = 1/(1.12 - 0.30) = 1/0.82 = 1.22 (22% zoom in)
+            # The combination of entering-wide and zooming-in feels like stepping into a room.
+            end_z = self._clamp(sz - zb * 0.30 * motion_strength, self.z_near, self.z_far)
+            end_x = self._clamp(sx * 0.12, -xm, xm)   # sweep toward center
+            end_y = self._clamp(sy * 0.12, -ym, ym)
+            start = (sx, sy, sz)
+            end   = (end_x, end_y, end_z)
+
+        elif motion_type == "PUSH_IN":
+            # Feature shot: aggressive push toward the subject
+            end_z = self._clamp(sz - zb * 0.30 * motion_strength, self.z_near, self.z_far)
+            end_x = self._clamp(sx + self.rng.uniform(-xm * 0.12, xm * 0.12), -self.x_max, self.x_max)
             end_y = self._clamp(sy + self.rng.uniform(-ym * 0.08, ym * 0.08), -self.y_max, self.y_max)
             start = (sx, sy, sz)
             end   = (end_x, end_y, end_z)
 
-        else:  # SLOW_DRIFT — beauty/rest shot, barely perceptible motion
-            drift_x = xm * 0.15
-            drift_y = ym * 0.15
-            end_x = self._clamp(sx + self.rng.uniform(-drift_x, drift_x), -self.x_max, self.x_max)
-            end_y = self._clamp(sy + self.rng.uniform(-drift_y, drift_y), -self.y_max, self.y_max)
-            end_z = self._clamp(sz - (z_base * 0.01) * motion_strength, z_near, z_far)
+        elif motion_type == "PULL_OUT":
+            # Withdraw to reveal context
+            end_z = self._clamp(sz + zb * 0.22 * motion_strength, self.z_near, self.z_far)
+            end_x = self._clamp(sx + self.rng.uniform(-xm * 0.12, xm * 0.12), -self.x_max, self.x_max)
+            end_y = self._clamp(sy + self.rng.uniform(-ym * 0.08, ym * 0.08), -self.y_max, self.y_max)
             start = (sx, sy, sz)
             end   = (end_x, end_y, end_z)
+
+        elif motion_type == "DOLLY_BACK":
+            end_z = self._clamp(sz + zb * 0.18 * motion_strength, self.z_near, self.z_far)
+            end_x = self._clamp(sx * 0.3, -xm, xm)
+            end_y = self._clamp(sy * 0.3, -ym, ym)
+            start = (sx, sy, sz)
+            end   = (end_x, end_y, end_z)
+
+        elif motion_type == "ORBIT":
+            # Parametric arc around subject — gentle breathe on Z
+            orbit_x = xm * 0.75
+            end_x = self._clamp(sx - orbit_x, -self.x_max, self.x_max)
+            end_z = self._clamp(sz - zb * 0.04 * motion_strength, self.z_near, self.z_far)
+            start = (sx, sy, sz)
+            end   = (end_x, self._clamp(sy * 0.3, -self.y_max, self.y_max), end_z)
+
+        elif motion_type == "TRACK_LEFT":
+            end_x = self._clamp(sx - xm * 0.85, -self.x_max, self.x_max)
+            end_z = self._clamp(sz - zb * 0.03 * motion_strength, self.z_near, self.z_far)
+            start = (sx, sy, sz)
+            end   = (end_x, sy, end_z)
+
+        elif motion_type == "TRACK_RIGHT":
+            end_x = self._clamp(sx + xm * 0.85, -self.x_max, self.x_max)
+            end_z = self._clamp(sz - zb * 0.03 * motion_strength, self.z_near, self.z_far)
+            start = (sx, sy, sz)
+            end   = (end_x, sy, end_z)
+
+        elif motion_type == "SLOW_DRIFT":
+            # Beauty/rest shot — barely visible movement
+            end_x = self._clamp(sx + self.rng.uniform(-xm * 0.08, xm * 0.08), -self.x_max, self.x_max)
+            end_y = self._clamp(sy + self.rng.uniform(-ym * 0.06, ym * 0.06), -self.y_max, self.y_max)
+            end_z = self._clamp(sz - zb * 0.02 * motion_strength, self.z_near, self.z_far)
+            start = (sx, sy, sz)
+            end   = (end_x, end_y, end_z)
+
+        else:
+            # Fallback: gentle push
+            end_z = self._clamp(sz - zb * 0.08 * motion_strength, self.z_near, self.z_far)
+            start = (sx, sy, sz)
+            end   = (sx, sy, end_z)
 
         return start, end
 
     def _compute_transition(self, from_room: str, to_room: str) -> str:
-        """
-        Selects transition type based on room adjacency.
-
-          open_plan  → MOTION_MATCH  (continuous move, no overlay)
-          doorway    → CROSS_DISSOLVE
-          hallway    → CROSS_DISSOLVE
-          distant    → FADE
-          same room  → CUT
-        """
         if from_room == to_room:
             return "CUT"
-
         adjacency = ROOM_ADJACENCY_GRAPH.get(from_room, [])
         for (adj_room, hint) in adjacency:
             if adj_room == to_room:
-                if hint == "open_plan":
-                    return "MOTION_MATCH"
-                else:
-                    return "CROSS_DISSOLVE"
-
-        # No defined adjacency — rooms are spatially distant
+                return "MOTION_MATCH" if hint == "open_plan" else "CROSS_DISSOLVE"
         return "FADE"

@@ -88,22 +88,14 @@ class DirectorService:
 
     def sequence_shots(self, hero_shots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Enforces narrative ordering (Exterior → Living → Private → Amenities).
-        Within the same room bucket, preserves upload order.
-        """
-        def get_sort_key(indexed_shot):
-            original_index, shot = indexed_shot
-            room = shot.get("room_type", "Other")
-            try:
-                room_rank = ROOM_IMPORTANCE_HIERARCHY.index(room)
-            except ValueError:
-                room_rank = len(ROOM_IMPORTANCE_HIERARCHY)
-            return (room_rank, original_index)
+        Preserves the upload order exactly — images are supplied by the caller
+        in the correct narrative order (e.g. front door → living room → kitchen).
 
-        sequenced = []
-        for _, shot in sorted(enumerate(hero_shots), key=get_sort_key):
-            sequenced.append(dict(shot))
-        return sequenced
+        NOTE: The previous version sorted by ROOM_IMPORTANCE_HIERARCHY which
+        over-rode the caller's ordering.  That has been removed.  If the caller
+        wants a different order, they should pass photos in that order.
+        """
+        return list(hero_shots)
 
     def allocate_screen_time(self, sequenced_shots: List[Dict[str, Any]]) -> List[ShotNode]:
         """

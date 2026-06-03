@@ -22,18 +22,22 @@ ROOM_IMPORTANCE_HIERARCHY: List[str] = [
 ]
 
 # Plane over-scale factor inside Remotion components.
-# Increased to 1.25 to support wider dolly/Z travel range without edge bleed.
-# Keep this value mirrored in remotion/src/components/DepthParallaxScene.tsx.
-PLANE_OVERSCALE_FACTOR: float = 1.25
+# Image is rendered at (factor * 100)% size to give room for pan/zoom.
+# 1.5 = 50% oversize — plenty of margin for strong Z dolly and XY pan.
+# Keep this value mirrored in remotion/src/components/CinematicScene.tsx.
+PLANE_OVERSCALE_FACTOR: float = 1.5
 
 # Z-axis (depth) travel range for cinematic dolly movement.
 # Expressed as multipliers of camera_z_base.
-#   DOLLY_Z_MIN_MULT  — closest approach (push-in end / pull-out start)
-#   DOLLY_Z_MAX_MULT  — farthest position (pull-out end / wide reveal start)
-# These are deliberately tight (±8%) to match Collov's barely-perceptible
-# forward motion.  Larger values cause visible depth lunges (was ±18%).
-DOLLY_Z_MIN_MULT: float = 0.92   # 8% closer than neutral
-DOLLY_Z_MAX_MULT: float = 1.08   # 8% farther than neutral
+#
+# CSS scale = z_base / camera_z:
+#   At DOLLY_Z_MIN_MULT = 0.70 → scale = 1/0.70 = 1.43 → 43% zoom-in (strong forward walk)
+#   At DOLLY_Z_MAX_MULT = 1.35 → scale = 1/1.35 = 0.74 → 26% zoom-out (wide reveal)
+#
+# These values create clearly visible motion. Previous ±8% produced <8% scale change
+# which was imperceptible as forward movement.
+DOLLY_Z_MIN_MULT: float = 0.70   # 30% closer → 43% apparent zoom-in
+DOLLY_Z_MAX_MULT: float = 1.35   # 35% farther → 26% apparent zoom-out
 
 # Camera Z-axis movement relative multipliers (legacy — kept for backwards compat)
 PUSH_IN_START_MULT: float = 1.10
