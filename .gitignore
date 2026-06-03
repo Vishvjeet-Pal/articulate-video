@@ -1,0 +1,9 @@
+backend/venv/
+backend/uploads/
+backend/output_*
+web/
+__pycache__/
+node_modules/
+*.mp4
+remotion/package.json
+remotion/package-lock.json
