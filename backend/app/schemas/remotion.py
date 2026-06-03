@@ -41,8 +41,8 @@ class ShotNode(BaseModel):
     motion_type: Literal[
         "PUSH_IN", "PULL_OUT", "DOLLY_FORWARD", "DOLLY_BACK",
         "ORBIT", "REVEAL", "TRACK_LEFT", "TRACK_RIGHT",
-        "WALK_FORWARD", "SLOW_DRIFT"
-    ] = "WALK_FORWARD"
+        "WALK_FORWARD", "SLOW_DRIFT", "DYNAMIC_SWEEP"  # <-- Added DYNAMIC_SWEEP here
+    ] = "DYNAMIC_SWEEP"
 
     # 0.0 = minimal movement, 1.0 = maximum travel for the motion type
     motion_strength: float = Field(default=0.5, ge=0.0, le=1.0)
