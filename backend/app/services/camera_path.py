@@ -3,6 +3,7 @@ CameraPathPlanner
 =================
 Generates continuous velocity-driven camera trajectories for real estate tours.
 Features: Duplicate filtering, dynamic AI targeting, and organic human-like motion.
+100% Dynamic Math: Zero dependency on 'room_type' for visual generation.
 """
 
 import math
@@ -11,10 +12,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import (
-    CAMERA_MOTION_PRESETS,
     DOLLY_Z_MAX_MULT,
     DOLLY_Z_MIN_MULT,
-    MOTION_STRENGTH_DEFAULTS,
     PLANE_OVERSCALE_FACTOR,
     ROOM_ADJACENCY_GRAPH,
 )
@@ -33,18 +32,6 @@ class ShotCameraParams:
     motion_curve: str
     depth_parallax_strength: float
     transition_type: str
-
-_ROOM_WORLD_POSITIONS: Dict[str, Tuple[float, float, float]] = {
-    "Exterior":         (0.0,   0.0,   0.0),
-    "Living Room":      (0.0,   0.0,   6.0),
-    "Kitchen":          (16.0,  0.0,   6.0),   
-    "Dining Room":      (8.0,   0.0,   4.0),
-    "Primary Bedroom":  (-10.0, 0.0,  14.0),
-    "Other Bedrooms":   (10.0,  0.0,  14.0),
-    "Primary Bathroom": (-10.0, -1.0, 18.0),
-    "Other Bathrooms":  (10.0,  -1.0, 18.0),
-    "Other":            (0.0,   0.0,  10.0),
-}
 
 class CameraPathPlanner:
 
@@ -71,60 +58,25 @@ class CameraPathPlanner:
         self.z_far  = self.camera_z_base * DOLLY_Z_MAX_MULT  
 
     def _deduplicate_shots(self, shots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Filters out consecutive duplicate images to prevent redundant looping."""
         unique_shots = []
         last_url = None
         for shot in shots:
-            # Fallback to room_type if no URL is provided, though URL is safer
             identifier = shot.get("image_url") or shot.get("room_type")
             if identifier != last_url:
                 unique_shots.append(shot)
                 last_url = identifier
         return unique_shots
 
+    # =========================================================================
+    # RESTORED API CONTRACTS (Untouched to protect director.py)
+    # =========================================================================
     def build_room_graph(self, shots: List[Dict[str, Any]]) -> Dict[str, RoomNode]:
         nodes: Dict[str, RoomNode] = {}
         for shot in shots:
             room = shot.get("room_type", "Other")
             if room not in nodes:
-                pos = _ROOM_WORLD_POSITIONS.get(room, (0.0, 0.0, 10.0))
-                nodes[room] = RoomNode(room_type=room, position=pos)
+                nodes[room] = RoomNode(room_type=room, position=(0.0, 0.0, 0.0))
         return nodes
-
-    def assign_motion_types(self, shots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        # First, strip redundancies so the timeline is clean
-        clean_shots = self._deduplicate_shots(shots)
-        
-        enriched = []
-        for idx, shot in enumerate(clean_shots):
-            room      = shot.get("room_type", "Other")
-            prev_room = clean_shots[idx - 1].get("room_type", "Other") if idx > 0 else None
-            next_room = clean_shots[idx + 1].get("room_type", "Other") if idx < len(clean_shots) - 1 else None
-
-            if idx == 0:
-                motion_type = "REVEAL"
-            elif idx == len(clean_shots) - 1:
-                motion_type = "SLOW_DRIFT"
-            elif room == "Kitchen":
-                motion_type = "PULL_OUT"
-            elif room != prev_room:
-                motion_type = "DOLLY_FORWARD"
-            elif next_room is not None and next_room != room:
-                motion_type = "WALK_FORWARD"
-            else:
-                presets = CAMERA_MOTION_PRESETS.get(room, CAMERA_MOTION_PRESETS["Other"])
-                motion_type = self._weighted_choice(presets)
-
-            strength = MOTION_STRENGTH_DEFAULTS.get(motion_type, 0.7)
-            strength = max(0.65, min(1.0, strength + self.rng.uniform(-0.02, 0.05)))
-
-            s = dict(shot)
-            s["motion_type"]     = motion_type
-            s["motion_strength"] = round(strength, 3)
-            s["motion_curve"]    = "linear"  
-            s["next_room"]       = next_room
-            enriched.append(s)
-        return enriched
 
     def _compute_transition(self, from_room: str, to_room: str) -> str:
         if from_room == to_room:
@@ -135,16 +87,50 @@ class CameraPathPlanner:
                 return "MOTION_MATCH" if hint == "open_plan" else "CROSS_DISSOLVE"
         return "FADE"
 
+    # =========================================================================
+    # DYNAMIC VISUAL ENGINE (room_type logic completely removed)
+    # =========================================================================
+    def assign_motion_types(self, shots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        clean_shots = self._deduplicate_shots(shots)
+        
+        enriched = []
+        for idx, shot in enumerate(clean_shots):
+            mean_depth = shot.get("mean_depth_normalized", 0.5)
+
+            if idx == 0:
+                motion_type = "REVEAL"
+            elif idx == len(clean_shots) - 1:
+                motion_type = "SLOW_DRIFT"
+            elif mean_depth < 0.40:
+                # DYNAMIC REPLACEMENT: If the room is physically shallow, pull out. No "Kitchen" text check needed.
+                motion_type = "PULL_OUT"
+            else:
+                # Dynamic cinematic assignment based on physical space, not text labels
+                motion_type = self._weighted_choice([
+                    ("WALK_FORWARD", 0.5),
+                    ("DOLLY_FORWARD", 0.3),
+                    ("ORBIT", 0.1),
+                    ("PUSH_IN", 0.1)
+                ])
+
+            strength = 0.75 
+            strength = max(0.65, min(1.0, strength + self.rng.uniform(-0.02, 0.05)))
+
+            s = dict(shot)
+            s["motion_type"]     = motion_type
+            s["motion_strength"] = round(strength, 3)
+            s["motion_curve"]    = "linear"  
+            enriched.append(s)
+        return enriched
+
     def _direction_to_next_shot(self, current_shot: Dict[str, Any], next_shot: Optional[Dict[str, Any]]) -> Tuple[float, float]:
         if not next_shot:
             return (0.0, 0.0)
 
-        # 1. CROSS-IMAGE FEATURE MATCHING
         shared_target = current_shot.get("shared_visual_target")
         if shared_target and len(shared_target) >= 2:
             return (float(shared_target[0]), float(shared_target[1]))
 
-        # 2. POSE MATRICES
         pose_cur = current_shot.get("camera_pose")
         pose_nxt = next_shot.get("camera_pose")
         if pose_cur and pose_nxt:
@@ -155,31 +141,17 @@ class CameraPathPlanner:
             if mag > 0.001:
                 return (dx/mag, dy/mag)
 
-        # 3. SALIENCY TARGET
         focal_target = current_shot.get("target_focal_center")
         if focal_target and len(focal_target) >= 2:
             return (float(focal_target[0]), float(focal_target[1]))
 
-        # 4. FALLBACK
-        room_cur = current_shot.get("room_type", "Other")
-        room_nxt = next_shot.get("room_type", "Other")
-        cur  = _ROOM_WORLD_POSITIONS.get(room_cur, (0.0, 0.0, 0.0))
-        nxt  = _ROOM_WORLD_POSITIONS.get(room_nxt, (0.0, 0.0, 0.0))
-        dx, dy = nxt[0] - cur[0], nxt[1] - cur[1]
-        mag = math.sqrt(dx * dx + dy * dy)
-        if mag > 0.001:
-            return (dx / mag, dy / mag)
-
-        return (0.0, 0.0)
+        # Purely dynamic fallback if no AI data is present
+        return (self.rng.uniform(-0.5, 0.5), self.rng.uniform(-0.2, 0.2))
 
     def _calculate_dynamic_zoom_state(self, shot: Dict[str, Any]) -> float:
+        """Determines physical room depth directly from the depth map array."""
         mean_depth = shot.get("mean_depth_normalized", 0.5)
-        room = shot.get("room_type", "Other")
         
-        # Hard override for Kitchens to ensure structural safety if depth data is missing
-        if room == "Kitchen":
-            return -0.85
-            
         if mean_depth < 0.35:
             return -0.75
         elif mean_depth > 0.70:
@@ -188,8 +160,6 @@ class CameraPathPlanner:
 
     def plan_global_trajectory(self, shots: List[Dict[str, Any]], room_graph: Dict[str, RoomNode]) -> List[ShotCameraParams]:
         params: List[ShotCameraParams] = []
-        
-        # Deduplicate at the trajectory level to ensure final payload matches
         clean_shots = self._deduplicate_shots(shots)
 
         initial_x_offset = -self.x_max * 0.50  
@@ -286,7 +256,6 @@ class CameraPathPlanner:
         zoom_sensitivity = self._calculate_dynamic_zoom_state(shot)
         dir_x, dir_y = self._direction_to_next_shot(shot, next_shot)
         
-        # Guide the natural pan toward the detected transition target
         scan_sign = 1.0 if dir_x >= 0.0 else -1.0
         if zoom_sensitivity < 0:
             scan_sign = -1.0 
@@ -300,14 +269,13 @@ class CameraPathPlanner:
             start = (sx, sy, sz)
             end   = (end_x, end_y, end_z)
 
-        elif motion_type == "WALK_FORWARD" or shot.get("room_type") in ("Living Room", "Exterior"):
+        # DYNAMIC REPLACEMENT: Walk forward based on depth expanse, not room_type
+        elif motion_type == "WALK_FORWARD" or zoom_sensitivity > 1.0:
             if abs(dir_x) > 0.05:
-                # Target detected: Pan firmly toward the target quadrant while walking forward
                 end_x = self._clamp(sx + (dir_x * xm * 1.15) + horizontal_scan_delta * 0.15, -self.x_max, self.x_max)
                 end_y = self._clamp(sy + dir_y * ym * 0.70, -self.y_max, self.y_max)
                 z_travel = (zb * 0.45 * motion_strength) * zoom_sensitivity
             else:
-                # No specific target: Natural sweeping scan
                 end_x = self._clamp(sx + horizontal_scan_delta, -self.x_max, self.x_max)
                 end_y = self._clamp(sy + self.rng.uniform(-ym * 0.05, ym * 0.05), -self.y_max, self.y_max)
                 z_travel = (zb * 0.38 * motion_strength) * zoom_sensitivity
@@ -317,14 +285,12 @@ class CameraPathPlanner:
             end   = (end_x, end_y, end_z)
 
         elif motion_type == "PULL_OUT" or zoom_sensitivity < 0:
-            # For tight spaces (Kitchens): PULL OUT while panning wide to reveal context
             end_x = self._clamp(sx + horizontal_scan_delta * 1.3, -self.x_max, self.x_max)
             end_y = self._clamp(sy + self.rng.uniform(-ym * 0.05, ym * 0.05), -self.y_max, self.y_max)
             
             z_travel = (zb * 0.32 * motion_strength) * zoom_sensitivity
             end_z = self._clamp(sz - z_travel, self.z_near, self.z_far)
             
-            # Start wide to guarantee zero cropping
             if zoom_sensitivity < 0 and sz < zb:
                 sz = zb * 0.88
                 
