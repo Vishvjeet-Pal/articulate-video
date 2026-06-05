@@ -2,8 +2,6 @@
 CameraPathPlanner
 =================
 Generates continuous velocity-driven camera trajectories for real estate tours.
-Features: Duplicate filtering, dynamic AI targeting, and organic human-like motion.
-100% Dynamic Math: Zero dependency on 'room_type' for visual generation.
 """
 
 import math
@@ -67,9 +65,6 @@ class CameraPathPlanner:
                 last_url = identifier
         return unique_shots
 
-    # =========================================================================
-    # RESTORED API CONTRACTS (Untouched to protect director.py)
-    # =========================================================================
     def build_room_graph(self, shots: List[Dict[str, Any]]) -> Dict[str, RoomNode]:
         nodes: Dict[str, RoomNode] = {}
         for shot in shots:
@@ -87,30 +82,36 @@ class CameraPathPlanner:
                 return "MOTION_MATCH" if hint == "open_plan" else "CROSS_DISSOLVE"
         return "FADE"
 
-    # =========================================================================
-    # DYNAMIC VISUAL ENGINE (room_type logic completely removed)
-    # =========================================================================
     def assign_motion_types(self, shots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         clean_shots = self._deduplicate_shots(shots)
         
         enriched = []
         for idx, shot in enumerate(clean_shots):
             mean_depth = shot.get("mean_depth_normalized", 0.5)
+            room_type = shot.get("room_type", "Other")
 
             if idx == 0:
                 motion_type = "REVEAL"
             elif idx == len(clean_shots) - 1:
                 motion_type = "SLOW_DRIFT"
+            elif room_type in ["Exterior", "Pool"]:
+                # ADDED: Human-like lateral panning for exterior and pool shots
+                motion_type = self._weighted_choice([
+                    ("TRACK_LEFT", 0.30),
+                    ("TRACK_RIGHT", 0.30),
+                    ("ORBIT", 0.20),
+                    ("PULL_OUT", 0.10),
+                    ("WALK_FORWARD", 0.10)
+                ])
             elif mean_depth < 0.40:
-                # DYNAMIC REPLACEMENT: If the room is physically shallow, pull out. No "Kitchen" text check needed.
                 motion_type = "PULL_OUT"
             else:
-                # Dynamic cinematic assignment based on physical space, not text labels
                 motion_type = self._weighted_choice([
-                    ("WALK_FORWARD", 0.5),
-                    ("DOLLY_FORWARD", 0.3),
-                    ("ORBIT", 0.1),
-                    ("PUSH_IN", 0.1)
+                    ("WALK_FORWARD", 0.40),
+                    ("DOLLY_FORWARD", 0.20),
+                    ("TRACK_LEFT", 0.15),
+                    ("TRACK_RIGHT", 0.15),
+                    ("ORBIT", 0.10)
                 ])
 
             strength = 0.75 
@@ -145,13 +146,10 @@ class CameraPathPlanner:
         if focal_target and len(focal_target) >= 2:
             return (float(focal_target[0]), float(focal_target[1]))
 
-        # Purely dynamic fallback if no AI data is present
         return (self.rng.uniform(-0.5, 0.5), self.rng.uniform(-0.2, 0.2))
 
     def _calculate_dynamic_zoom_state(self, shot: Dict[str, Any]) -> float:
-        """Determines physical room depth directly from the depth map array."""
         mean_depth = shot.get("mean_depth_normalized", 0.5)
-        
         if mean_depth < 0.35:
             return -0.75
         elif mean_depth > 0.70:
@@ -269,7 +267,6 @@ class CameraPathPlanner:
             start = (sx, sy, sz)
             end   = (end_x, end_y, end_z)
 
-        # DYNAMIC REPLACEMENT: Walk forward based on depth expanse, not room_type
         elif motion_type == "WALK_FORWARD" or zoom_sensitivity > 1.0:
             if abs(dir_x) > 0.05:
                 end_x = self._clamp(sx + (dir_x * xm * 1.15) + horizontal_scan_delta * 0.15, -self.x_max, self.x_max)

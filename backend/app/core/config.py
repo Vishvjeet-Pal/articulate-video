@@ -18,7 +18,7 @@ ROOM_IMPORTANCE_HIERARCHY: List[str] = [
     "Other Bedrooms",
     "Primary Bathroom",
     "Other Bathrooms",
-    "Pool",  # ADDED POOL CATEGORY
+    "Pool",  
     "Other"
 ]
 
@@ -32,14 +32,13 @@ DOLLY_Z_MAX_MULT: float = 1.35
 # Camera Z-axis movement relative multipliers 
 PUSH_IN_START_MULT: float = 1.10
 PUSH_IN_END_MULT: float = 0.90
-
 PULL_BACK_START_MULT: float = 0.90
 PULL_BACK_END_MULT: float = 1.10
 
 # Walking sway amplitude as a fraction of the X pan budget.
 WALK_SWAY_AMPLITUDE: float = 0.04
 
-# Room adjacency graph - Pool is now connected to Exterior
+# Room adjacency graph 
 ROOM_ADJACENCY_GRAPH: Dict[str, List[Tuple[str, str]]] = {
     "Exterior":        [("Living Room", "doorway"), ("Pool", "pathway"), ("Other", "doorway")],
     "Living Room":     [("Exterior", "doorway"), ("Kitchen", "open_plan"), ("Dining Room", "open_plan"), ("Primary Bedroom", "hallway")],
@@ -49,13 +48,13 @@ ROOM_ADJACENCY_GRAPH: Dict[str, List[Tuple[str, str]]] = {
     "Other Bedrooms":  [("Other Bathrooms", "doorway"), ("Living Room", "hallway")],
     "Primary Bathroom":[("Primary Bedroom", "doorway")],
     "Other Bathrooms": [("Other Bedrooms", "doorway")],
-    "Pool":            [("Exterior", "pathway")], # ADDED POOL ADJACENCY
+    "Pool":            [("Exterior", "pathway")], 
     "Other":           [("Living Room", "open_plan")],
 }
 
-# Camera motion presets per room type.
+# Camera motion presets per room type (Updated with lateral moves for Exterior)
 CAMERA_MOTION_PRESETS: Dict[str, List[Tuple[str, float]]] = {
-    "Exterior":         [("REVEAL", 0.35), ("PULL_OUT", 0.30), ("WALK_FORWARD", 0.20), ("SLOW_DRIFT", 0.15)],
+    "Exterior":         [("TRACK_LEFT", 0.25), ("TRACK_RIGHT", 0.25), ("ORBIT", 0.20), ("PULL_OUT", 0.15), ("REVEAL", 0.15)],
     "Living Room":      [("WALK_FORWARD", 0.30), ("SLOW_DRIFT", 0.25), ("PUSH_IN", 0.20), ("REVEAL", 0.15), ("TRACK_LEFT", 0.10)],
     "Kitchen":          [("TRACK_LEFT", 0.30), ("TRACK_RIGHT", 0.25), ("PUSH_IN", 0.25), ("WALK_FORWARD", 0.20)],
     "Dining Room":      [("SLOW_DRIFT", 0.35), ("ORBIT", 0.30), ("PUSH_IN", 0.20), ("WALK_FORWARD", 0.15)],
@@ -63,11 +62,10 @@ CAMERA_MOTION_PRESETS: Dict[str, List[Tuple[str, float]]] = {
     "Other Bedrooms":   [("SLOW_DRIFT", 0.30), ("PUSH_IN", 0.30), ("DOLLY_FORWARD", 0.25), ("TRACK_LEFT", 0.15)],
     "Primary Bathroom": [("PUSH_IN", 0.35), ("SLOW_DRIFT", 0.35), ("REVEAL", 0.30)],
     "Other Bathrooms":  [("PUSH_IN", 0.40), ("SLOW_DRIFT", 0.35), ("REVEAL", 0.25)],
-    "Pool":             [("SLOW_DRIFT", 0.40), ("ORBIT", 0.35), ("REVEAL", 0.25)], # ADDED POOL CINEMATIC PRESETS
+    "Pool":             [("TRACK_LEFT", 0.30), ("TRACK_RIGHT", 0.30), ("ORBIT", 0.20), ("SLOW_DRIFT", 0.20)], 
     "Other":            [("WALK_FORWARD", 0.40), ("SLOW_DRIFT", 0.30), ("PUSH_IN", 0.30)],
 }
 
-# Default motion strength per motion type (0.0 – 1.0)
 MOTION_STRENGTH_DEFAULTS: Dict[str, float] = {
     "PUSH_IN":       0.70,
     "PULL_OUT":      0.65,
@@ -86,7 +84,7 @@ ROOM_TIME_MULTIPLIERS: Dict[str, float] = {
     "Kitchen":          2.0,
     "Primary Bedroom":  2.0,
     "Exterior":         1.5,
-    "Pool":             1.5, # ADDED POOL PACING
+    "Pool":             1.5, 
     "Dining Room":      1.3,
     "Primary Bathroom": 1.0,
     "Other Bedrooms":   1.0,
@@ -94,20 +92,20 @@ ROOM_TIME_MULTIPLIERS: Dict[str, float] = {
     "Other":            1.0,
 }
 
-# Pacing Baseline Durations (ms)
 PACING_BASE_DURATION: Dict[str, int] = {
     "SLOW":   7000,
     "NORMAL": 5000,
     "FAST":   3500
 }
 
-# FFmpeg Social Crop Presets
+# INCREASED to 5 shots per room for high-accuracy 3D sampling
+MAX_SHOTS_PER_ROOM: int = 5
+
 SOCIAL_RATIOS: Dict[str, str] = {
     "IG_REELS": "9:16",
     "FB_FEED":  "1:1"
 }
 
-# Celery / Redis config
 REDIS_URL: str = "redis://localhost:6379/0"
 CELERY_BROKER_URL: str = REDIS_URL
 CELERY_RESULT_BACKEND: str = REDIS_URL
