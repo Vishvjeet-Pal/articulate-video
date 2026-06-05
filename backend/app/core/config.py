@@ -8,7 +8,7 @@ MAX_VIDEO_DURATION_MS: int = 120000
 MIN_SHOT_DURATION_MS: int = 3000
 MAX_SHOT_DURATION_MS: int = 8000
 
-# SOW Narrative Sequencing Hierarchy: Exterior Entry -> Living Spaces -> Private Spaces -> Amenities/Other
+# SOW Narrative Sequencing Hierarchy
 ROOM_IMPORTANCE_HIERARCHY: List[str] = [
     "Exterior",
     "Living Room",
@@ -18,28 +18,18 @@ ROOM_IMPORTANCE_HIERARCHY: List[str] = [
     "Other Bedrooms",
     "Primary Bathroom",
     "Other Bathrooms",
+    "Pool",  # ADDED POOL CATEGORY
     "Other"
 ]
 
 # Plane over-scale factor inside Remotion components.
-# Image is rendered at (factor * 100)% size to give room for pan/zoom.
-# 1.5 = 50% oversize — plenty of margin for strong Z dolly and XY pan.
-# Keep this value mirrored in remotion/src/components/CinematicScene.tsx.
 PLANE_OVERSCALE_FACTOR: float = 1.5
 
 # Z-axis (depth) travel range for cinematic dolly movement.
-# Expressed as multipliers of camera_z_base.
-#
-# CSS scale = z_base / camera_z:
-#   At DOLLY_Z_MIN_MULT = 0.70 → scale = 1/0.70 = 1.43 → 43% zoom-in (strong forward walk)
-#   At DOLLY_Z_MAX_MULT = 1.35 → scale = 1/1.35 = 0.74 → 26% zoom-out (wide reveal)
-#
-# These values create clearly visible motion. Previous ±8% produced <8% scale change
-# which was imperceptible as forward movement.
-DOLLY_Z_MIN_MULT: float = 0.70   # 30% closer → 43% apparent zoom-in
-DOLLY_Z_MAX_MULT: float = 1.35   # 35% farther → 26% apparent zoom-out
+DOLLY_Z_MIN_MULT: float = 0.70   
+DOLLY_Z_MAX_MULT: float = 1.35   
 
-# Camera Z-axis movement relative multipliers (legacy — kept for backwards compat)
+# Camera Z-axis movement relative multipliers 
 PUSH_IN_START_MULT: float = 1.10
 PUSH_IN_END_MULT: float = 0.90
 
@@ -47,16 +37,11 @@ PULL_BACK_START_MULT: float = 0.90
 PULL_BACK_END_MULT: float = 1.10
 
 # Walking sway amplitude as a fraction of the X pan budget.
-# 0.04 = ±4% of x_max — subtle hand-held feel.
 WALK_SWAY_AMPLITUDE: float = 0.04
 
-# -------------------------------------------------------------------
-# Room adjacency graph — used by CameraPathPlanner to infer
-# spatial relationships and select cinematic transition types.
-# Each entry: from_room -> [(to_room, transition_hint)]
-# -------------------------------------------------------------------
+# Room adjacency graph - Pool is now connected to Exterior
 ROOM_ADJACENCY_GRAPH: Dict[str, List[Tuple[str, str]]] = {
-    "Exterior":        [("Living Room", "doorway"), ("Other", "doorway")],
+    "Exterior":        [("Living Room", "doorway"), ("Pool", "pathway"), ("Other", "doorway")],
     "Living Room":     [("Exterior", "doorway"), ("Kitchen", "open_plan"), ("Dining Room", "open_plan"), ("Primary Bedroom", "hallway")],
     "Kitchen":         [("Living Room", "open_plan"), ("Dining Room", "open_plan")],
     "Dining Room":     [("Kitchen", "open_plan"), ("Living Room", "open_plan")],
@@ -64,14 +49,11 @@ ROOM_ADJACENCY_GRAPH: Dict[str, List[Tuple[str, str]]] = {
     "Other Bedrooms":  [("Other Bathrooms", "doorway"), ("Living Room", "hallway")],
     "Primary Bathroom":[("Primary Bedroom", "doorway")],
     "Other Bathrooms": [("Other Bedrooms", "doorway")],
+    "Pool":            [("Exterior", "pathway")], # ADDED POOL ADJACENCY
     "Other":           [("Living Room", "open_plan")],
 }
 
-# -------------------------------------------------------------------
 # Camera motion presets per room type.
-# Each entry: room_type -> [(motion_type, weight)]
-# Weights are relative — they are normalised inside CameraPathPlanner.
-# -------------------------------------------------------------------
 CAMERA_MOTION_PRESETS: Dict[str, List[Tuple[str, float]]] = {
     "Exterior":         [("REVEAL", 0.35), ("PULL_OUT", 0.30), ("WALK_FORWARD", 0.20), ("SLOW_DRIFT", 0.15)],
     "Living Room":      [("WALK_FORWARD", 0.30), ("SLOW_DRIFT", 0.25), ("PUSH_IN", 0.20), ("REVEAL", 0.15), ("TRACK_LEFT", 0.10)],
@@ -81,6 +63,7 @@ CAMERA_MOTION_PRESETS: Dict[str, List[Tuple[str, float]]] = {
     "Other Bedrooms":   [("SLOW_DRIFT", 0.30), ("PUSH_IN", 0.30), ("DOLLY_FORWARD", 0.25), ("TRACK_LEFT", 0.15)],
     "Primary Bathroom": [("PUSH_IN", 0.35), ("SLOW_DRIFT", 0.35), ("REVEAL", 0.30)],
     "Other Bathrooms":  [("PUSH_IN", 0.40), ("SLOW_DRIFT", 0.35), ("REVEAL", 0.25)],
+    "Pool":             [("SLOW_DRIFT", 0.40), ("ORBIT", 0.35), ("REVEAL", 0.25)], # ADDED POOL CINEMATIC PRESETS
     "Other":            [("WALK_FORWARD", 0.40), ("SLOW_DRIFT", 0.30), ("PUSH_IN", 0.30)],
 }
 
@@ -103,6 +86,7 @@ ROOM_TIME_MULTIPLIERS: Dict[str, float] = {
     "Kitchen":          2.0,
     "Primary Bedroom":  2.0,
     "Exterior":         1.5,
+    "Pool":             1.5, # ADDED POOL PACING
     "Dining Room":      1.3,
     "Primary Bathroom": 1.0,
     "Other Bedrooms":   1.0,
@@ -117,10 +101,7 @@ PACING_BASE_DURATION: Dict[str, int] = {
     "FAST":   3500
 }
 
-# Hero-shot max per room — prevents 6 nearly-identical bedroom shots
-MAX_SHOTS_PER_ROOM: int = 2
-
-# FFmpeg Social Crop Presets (Ratio strings or specific W:H values)
+# FFmpeg Social Crop Presets
 SOCIAL_RATIOS: Dict[str, str] = {
     "IG_REELS": "9:16",
     "FB_FEED":  "1:1"

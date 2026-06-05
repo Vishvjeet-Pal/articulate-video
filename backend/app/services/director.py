@@ -10,8 +10,7 @@ from app.core.config import (
     ROOM_IMPORTANCE_HIERARCHY, ROOM_TIME_MULTIPLIERS,
     PACING_BASE_DURATION, SOCIAL_RATIOS,
     PLANE_OVERSCALE_FACTOR, PUSH_IN_START_MULT, PUSH_IN_END_MULT,
-    PULL_BACK_START_MULT, PULL_BACK_END_MULT,
-    MAX_SHOTS_PER_ROOM,
+    PULL_BACK_START_MULT, PULL_BACK_END_MULT
 )
 from app.services.camera_path import CameraPathPlanner
 
@@ -28,9 +27,14 @@ class DirectorService:
         Robustly normalizes raw room strings to standard types in ROOM_IMPORTANCE_HIERARCHY.
         """
         room_lower = str(room or "Other").strip().lower()
+        
+        # Explicitly separate pool logic from exterior
+        if "pool" in room_lower:
+            return "Pool"
+            
         if any(token in room_lower for token in [
             "exterior", "entry", "facade", "front", "outdoor", "outside",
-            "yard", "patio", "porch", "driveway", "garage", "pool"
+            "yard", "patio", "porch", "driveway", "garage"
         ]):
             return "Exterior"
         if any(token in room_lower for token in ["living", "family room", "great room", "lounge"]):
@@ -51,8 +55,7 @@ class DirectorService:
 
     def get_room_label(self, photo: Dict[str, Any]) -> str:
         """
-        Accepts common upstream detection field names so valid exterior/living
-        classifications are not silently collapsed into Other.
+        Accepts common upstream detection field names.
         """
         for key in ("room_type", "room", "room_name", "scene_type", "classification", "label"):
             value = photo.get(key)
@@ -62,52 +65,39 @@ class DirectorService:
 
     def score_and_select_hero_shots(self, photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Normalises room labels and enforces a per-room cap of MAX_SHOTS_PER_ROOM
-        to avoid repetitive sequences (e.g. 6 nearly-identical bedroom shots).
-
-        Scoring is currently based on upload order (first photos per room are kept).
-        When quality / saliency metadata is available upstream it can be wired in here.
+        Allows multiple different images of the same room (e.g. 5 different Pool shots),
+        but strictly filters out exact duplicate images based on their URL.
         """
-        room_counts: Dict[str, int] = {}
         hero_shots = []
+        seen_urls = set()
 
         for photo in photos:
+            img_url = photo.get("image_url")
+            
+            # Drop the image if we've already processed this exact URL
+            if img_url:
+                if img_url in seen_urls:
+                    continue
+                seen_urls.add(img_url)
+
             raw_room = self.get_room_label(photo)
             norm_room = self.normalize_room_type(raw_room)
-
-            count = room_counts.get(norm_room, 0)
-            if count >= MAX_SHOTS_PER_ROOM:
-                continue  # Drop excess shots for this room
 
             normalized_photo = dict(photo)
             normalized_photo["room_type"] = norm_room
             hero_shots.append(normalized_photo)
-            room_counts[norm_room] = count + 1
 
         return hero_shots
 
     def sequence_shots(self, hero_shots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Preserves the upload order exactly — images are supplied by the caller
-        in the correct narrative order (e.g. front door → living room → kitchen).
-
-        NOTE: The previous version sorted by ROOM_IMPORTANCE_HIERARCHY which
-        over-rode the caller's ordering.  That has been removed.  If the caller
-        wants a different order, they should pass photos in that order.
+        Preserves the upload order exactly.
         """
         return list(hero_shots)
 
     def allocate_screen_time(self, sequenced_shots: List[Dict[str, Any]]) -> List[ShotNode]:
         """
         Assigns durations, camera trajectories, and motion types to every shot.
-
-        The key architectural change vs. the previous version:
-          - CameraPathPlanner generates a CONTINUOUS global trajectory so
-            each shot starts exactly where the previous one ended.
-          - Z-axis movement is now live — the camera dollies forward/back
-            based on the assigned motion_type.
-          - Motion types, easing curves, and depth parallax strength are
-            computed by CameraPathPlanner and stored on every ShotNode.
         """
         # --- Step 1: build room graph for adjacency / transition decisions ---
         room_graph = self.camera_planner.build_room_graph(sequenced_shots)
@@ -133,7 +123,7 @@ class DirectorService:
             duration = int(self.base_duration * multiplier)
             duration = max(MIN_SHOT_DURATION_MS, min(duration, MAX_SHOT_DURATION_MS))
 
-            # Mock saliency crops (placeholder — replace with real saliency data)
+            # Mock saliency crops
             crop_16_9 = "1080:1920:420:0"
             crop_9_16 = "1080:1920:420:0"
             crop_1_1  = "1080:1080:420:420"
@@ -150,7 +140,7 @@ class DirectorService:
                 motion_curve=cam.motion_curve,
                 depth_parallax_strength=cam.depth_parallax_strength,
 
-                # Globally-continuous camera positions (Shot N end == Shot N+1 start)
+                # Globally-continuous camera positions
                 camera_start_target=list(cam.start),
                 camera_end_target=list(cam.end),
 
