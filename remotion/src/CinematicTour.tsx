@@ -27,7 +27,7 @@
  */
 
 import React, { useMemo, Suspense } from 'react';
-import { AbsoluteFill, Series, useCurrentFrame, useVideoConfig } from 'remotion';
+import { AbsoluteFill, Series, useCurrentFrame, useVideoConfig, Audio } from 'remotion';
 import type { RemotionInputProps, ShotNodeConfig } from './Root';
 import { ShotNode } from './components/ShotNode';
 import { CinematicScene } from './components/CinematicScene';
@@ -68,7 +68,7 @@ const getActiveShot = (frame: number, timeline: ShotNodeConfig[]): ActiveShot =>
 };
 
 export const CinematicTour: React.FC<RemotionInputProps> = (props) => {
-    const { timeline, branding } = props;
+    const { timeline, branding, audio_config } = props;
     const frame = useCurrentFrame();
     const { width, height } = useVideoConfig();
 
@@ -76,6 +76,18 @@ export const CinematicTour: React.FC<RemotionInputProps> = (props) => {
 
     return (
         <AbsoluteFill style={{ backgroundColor: branding.primary_color_hex }}>
+            {audio_config && (audio_config.bgm_url || audio_config.track_url) && (
+                <Audio
+                    src={audio_config.bgm_url || audio_config.track_url || ''}
+                    volume={audio_config.volume_balance ?? 0.5}
+                />
+            )}
+            {audio_config && audio_config.voiceover_url && (
+                <Audio
+                    src={audio_config.voiceover_url}
+                    volume={1.0 - (audio_config.volume_balance ?? 0.5)}
+                />
+            )}
 
             {/*
               * CinematicScene — pure CSS transforms, frame-accurate.

@@ -74,12 +74,20 @@ class CameraPathPlanner:
         return nodes
 
     def _compute_transition(self, from_room: str, to_room: str) -> str:
+        """
+        PDF Feature Implemented: Contextual Transition Selection
+        - Same room -> CUT
+        - Adjacent room -> PAN
+        - Disjoint room -> FADE
+        """
         if from_room == to_room:
             return "CUT"
+            
         adjacency = ROOM_ADJACENCY_GRAPH.get(from_room, [])
         for (adj_room, hint) in adjacency:
             if adj_room == to_room:
-                return "MOTION_MATCH" if hint == "open_plan" else "CROSS_DISSOLVE"
+                return "PAN" 
+                
         return "FADE"
 
     def assign_motion_types(self, shots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -95,7 +103,6 @@ class CameraPathPlanner:
             elif idx == len(clean_shots) - 1:
                 motion_type = "SLOW_DRIFT"
             elif room_type in ["Exterior", "Pool"]:
-                # ADDED: Human-like lateral panning for exterior and pool shots
                 motion_type = self._weighted_choice([
                     ("TRACK_LEFT", 0.30),
                     ("TRACK_RIGHT", 0.30),
@@ -141,10 +148,6 @@ class CameraPathPlanner:
             mag = math.sqrt(dx*dx + dy*dy)
             if mag > 0.001:
                 return (dx/mag, dy/mag)
-
-        focal_target = current_shot.get("target_focal_center")
-        if focal_target and len(focal_target) >= 2:
-            return (float(focal_target[0]), float(focal_target[1]))
 
         return (self.rng.uniform(-0.5, 0.5), self.rng.uniform(-0.2, 0.2))
 

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional, Literal, Tuple, Dict, Any
 
 class UpstreamPose(BaseModel):
@@ -18,6 +18,14 @@ class AudioConfig(BaseModel):
     bgm_url: Optional[str] = None
     voiceover_url: Optional[str] = None
     volume_balance: float = Field(default=0.5, ge=0.0, le=1.0)
+    track_url: Optional[str] = None
+    bpm: Optional[float] = None
+
+    @model_validator(mode='after')
+    def set_bgm_url(self) -> 'AudioConfig':
+        if self.track_url and not self.bgm_url:
+            self.bgm_url = self.track_url
+        return self
 
 class BrandingConfig(BaseModel):
     brokerage_overlay_url: Optional[str] = None

@@ -52,6 +52,8 @@ export interface AudioConfig {
     bgm_url: string | null;
     voiceover_url: string | null;
     volume_balance: number;
+    track_url?: string | null;
+    bpm?: number | null;
 }
 
 export interface BrandingConfig {

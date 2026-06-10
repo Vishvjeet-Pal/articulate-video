@@ -56,10 +56,6 @@ class DirectorService:
         return "Other"
 
     def score_and_select_hero_shots(self, photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Removes exact URL duplicates. Limits each room to MAX_SHOTS_PER_ROOM (now 5),
-        sampling evenly from the sequence to guarantee physical coverage.
-        """
         unique_photos = []
         seen_urls = set()
 
@@ -77,6 +73,11 @@ class DirectorService:
             normalized_photo["room_type"] = norm_room
             unique_photos.append(normalized_photo)
 
+        MAX_TOTAL_SHOTS = 18 
+        
+        if len(unique_photos) <= MAX_TOTAL_SHOTS:
+            return unique_photos
+
         room_groups = {}
         for idx, photo in enumerate(unique_photos):
             rt = photo["room_type"]
@@ -84,15 +85,26 @@ class DirectorService:
                 room_groups[rt] = []
             room_groups[rt].append((idx, photo))
 
+        budget = MAX_TOTAL_SHOTS
+        allocation = {rt: 0 for rt in room_groups}
+        room_keys = list(room_groups.keys())
+        
+        while budget > 0 and sum(allocation.values()) < len(unique_photos):
+            for rt in room_keys:
+                if allocation[rt] < len(room_groups[rt]) and budget > 0:
+                    allocation[rt] += 1
+                    budget -= 1
+
         selected_indices = set()
-        for rt, group in room_groups.items():
-            if len(group) <= MAX_SHOTS_PER_ROOM:
-                for idx, _ in group:
-                    selected_indices.add(idx)
+        for rt, alloc in allocation.items():
+            group = room_groups[rt]
+            if alloc == 0:
+                continue
+            if alloc == 1:
+                selected_indices.add(group[0][0])
             else:
-                # Math to pick evenly spaced indices
-                for i in range(MAX_SHOTS_PER_ROOM):
-                    idx_in_group = int(i * (len(group) - 1) / (MAX_SHOTS_PER_ROOM - 1))
+                for i in range(alloc):
+                    idx_in_group = int(i * (len(group) - 1) / (alloc - 1))
                     selected_indices.add(group[idx_in_group][0])
 
         final_hero_shots = [photo for idx, photo in enumerate(unique_photos) if idx in selected_indices]
@@ -101,23 +113,52 @@ class DirectorService:
     def sequence_shots(self, hero_shots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return list(hero_shots)
 
-    def allocate_screen_time(self, sequenced_shots: List[Dict[str, Any]]) -> List[ShotNode]:
+    def allocate_screen_time(self, sequenced_shots: List[Dict[str, Any]], audio: AudioConfig) -> List[ShotNode]:
         room_graph = self.camera_planner.build_room_graph(sequenced_shots)
         shots_with_motion = self.camera_planner.assign_motion_types(sequenced_shots)
         camera_params_list = self.camera_planner.plan_global_trajectory(
             shots_with_motion, room_graph
         )
 
-        # First pass: Calculate default durations
+        # PDF Feature: Extract BPM for Beat Grid Snapping
+        bpm = 120
+        if audio:
+            if hasattr(audio, 'bpm') and audio.bpm:
+                bpm = audio.bpm
+            elif isinstance(audio, dict) and audio.get('bpm'):
+                bpm = float(audio.get('bpm'))
+                
+        # Calculate milliseconds per half-beat to snap transitions perfectly to the music
+        half_beat_ms = (60000.0 / bpm) / 2.0
+
+        # First pass: Calculate default durations with Emotional Arc Logic
         raw_durations = []
+        room_seen_counts = {}
+        
         for idx, shot in enumerate(shots_with_motion):
             room = shot.get("room_type", "Other")
-            multiplier = ROOM_TIME_MULTIPLIERS.get(room, 1.0)
-            if idx == 0 or idx == len(shots_with_motion) - 1:
-                multiplier *= 1.2
-            raw_durations.append(self.base_duration * multiplier)
+            
+            # Track how many times we've seen this room to apply Emotional Arc
+            count = room_seen_counts.get(room, 0)
+            room_seen_counts[room] = count + 1
+            
+            base_multiplier = ROOM_TIME_MULTIPLIERS.get(room, 1.0)
+            
+            # PDF Feature: Emotional Arc Pacing
+            if count == 0:
+                # 1. Establishing Shot: Slow, wide shot
+                arc_multiplier = 1.3
+            else:
+                # 2. Detail Shot: Faster cut
+                arc_multiplier = 0.7
+                
+            if idx == len(shots_with_motion) - 1:
+                # 3. Final Impression: Very slow
+                arc_multiplier = 1.6
+                
+            raw_durations.append(self.base_duration * base_multiplier * arc_multiplier)
 
-        # Dynamic Time Compression: If the video exceeds max length, shrink the shots proportionally.
+        # Dynamic Time Compression
         total_raw = sum(raw_durations)
         compression_factor = 1.0
         if total_raw > MAX_VIDEO_DURATION_MS:
@@ -128,10 +169,13 @@ class DirectorService:
             room = shot.get("room_type", "Other")
             
             # Apply compression factor
-            duration = int(raw_dur * compression_factor)
+            compressed_duration = raw_dur * compression_factor
             
-            # Soft clamp: ensure it never drops below the absolute minimum readable time
-            duration = max(MIN_SHOT_DURATION_MS, min(duration, MAX_SHOT_DURATION_MS))
+            # PDF Feature: Snap the duration to the nearest music beat
+            snapped_duration = round(compressed_duration / half_beat_ms) * half_beat_ms
+            
+            # Final safety clamp
+            duration = int(max(MIN_SHOT_DURATION_MS, min(snapped_duration, MAX_SHOT_DURATION_MS)))
 
             crop_16_9 = "1080:1920:420:0"
             crop_9_16 = "1080:1920:420:0"
@@ -166,7 +210,9 @@ class DirectorService:
     ) -> RemotionInputProps:
         hero_shots = self.score_and_select_hero_shots(photos)
         sequenced  = self.sequence_shots(hero_shots)
-        nodes      = self.allocate_screen_time(sequenced)
+        
+        # Pass audio config to the time allocator to sync to the beat
+        nodes = self.allocate_screen_time(sequenced, audio)
 
         total_duration = sum(node.duration_ms for node in nodes)
 
